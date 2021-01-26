@@ -98,6 +98,7 @@ pub enum Program {
     UProbe(UProbe),
     URetProbe(UProbe),
     SocketFilter(SocketFilter),
+    SkSkb(SkSkb),
     TracePoint(TracePoint),
     XDP(XDP),
 }
@@ -122,6 +123,11 @@ pub struct UProbe {
 
 /// Type to work with `socket filters`.
 pub struct SocketFilter {
+    common: ProgramData,
+}
+
+/// Type to work with `socket filters`.
+pub struct SkSkb {
     common: ProgramData,
 }
 
@@ -189,6 +195,8 @@ impl Program {
             fd: None,
         };
 
+        println!("kind {:?}", kind);
+
         Ok(match kind {
             "kprobe" => Program::KProbe(KProbe {
                 common,
@@ -208,6 +216,7 @@ impl Program {
             }),
             "tracepoint" => Program::TracePoint(TracePoint { common }),
             "socketfilter" => Program::SocketFilter(SocketFilter { common }),
+            "skskb" => Program::SkSkb(SkSkb { common }),
             "xdp" => Program::XDP(XDP {
                 common,
                 interfaces: Vec::new(),
@@ -225,6 +234,7 @@ impl Program {
             }
             XDP(_) => bpf_sys::bpf_prog_type_BPF_PROG_TYPE_XDP,
             SocketFilter(_) => bpf_sys::bpf_prog_type_BPF_PROG_TYPE_SOCKET_FILTER,
+            SkSkb(_) => bpf_sys::bpf_prog_type_BPF_PROG_TYPE_SK_SKB,
             TracePoint(_) => bpf_sys::bpf_prog_type_BPF_PROG_TYPE_TRACEPOINT,
         }
     }
@@ -237,6 +247,7 @@ impl Program {
             UProbe(p) | URetProbe(p) => &p.common,
             XDP(p) => &p.common,
             SocketFilter(p) => &p.common,
+            SkSkb(p) => &p.common,
             TracePoint(p) => &p.common,
         }
     }
@@ -249,6 +260,7 @@ impl Program {
             UProbe(p) | URetProbe(p) => &mut p.common,
             XDP(p) => &mut p.common,
             SocketFilter(p) => &mut p.common,
+            SkSkb(p) => &mut p.common,
             TracePoint(p) => &mut p.common,
         }
     }
@@ -535,6 +547,95 @@ impl SocketFilter {
     }
 }
 
+
+impl SkSkb {
+
+    pub fn name(&self) -> String {
+        self.common.name.to_string()
+    }
+
+    pub fn attach_map(&self, map: &Map, attach_type: bpf_sys::bpf_attach_type) -> Result<()>{
+        let prog_fd = self.common.fd.ok_or(Error::ProgramNotLoaded)?;
+        match unsafe { Self::bpf_prog_attach(map.fd as u32, prog_fd as u32, attach_type, 0) } {
+            0 => Ok(()),
+            _ => Err(Error::IO(io::Error::last_os_error())),
+        }
+    }
+
+    fn bpf_prog_attach(
+        target_fd: u32,
+        attach_bpf_fd: u32,
+        attach_type: u32,
+        attach_flags: u32
+    ) -> i32 {
+        println!("bpf_prog_attach");
+
+        unsafe {
+
+            let attr = bpf_sys::bpf_attr__bindgen_ty_5 {
+                target_fd,
+                attach_bpf_fd,
+                attach_type,
+                attach_flags,
+            };
+            let fd = Self::sys_bpf(bpf_sys::bpf_cmd_BPF_PROG_ATTACH, &attr as *const bpf_sys::bpf_attr__bindgen_ty_5 as *const _, 16);
+
+            if fd < 0 {
+                let erro = std::io::Error::last_os_error();
+                println!("erro {:?}", erro);
+            }
+
+            fd as i32
+        }
+    }
+
+    unsafe fn sys_bpf(cmd: bpf_sys::bpf_cmd, attr: *const std::ffi::c_void, size: usize) -> i64{
+        libc::syscall(libc::SYS_bpf, cmd, attr, size)
+    }
+
+    // pub fn attach_socket_filter(&mut self, interface: &str) -> Result<RawFd> {
+    //     let fd = self.common.fd.ok_or(Error::ProgramNotLoaded)?;
+    //     let ciface = CString::new(interface).unwrap();
+    //     let sfd = unsafe { bpf_sys::bpf_open_raw_sock(ciface.as_ptr()) };
+
+    //     if sfd < 0 {
+    //         return Err(Error::IO(io::Error::last_os_error()));
+    //     }
+
+    //     match unsafe { bpf_sys::bpf_attach_socket(sfd, fd) } {
+    //         0 => Ok(sfd),
+    //         _ => Err(Error::IO(io::Error::last_os_error())),
+    //     }
+    // }
+
+
+    // pub fn attach_kprobe(&mut self, fn_name: &str, offset: u64) -> Result<()> {
+    //     let fd = self.common.fd.ok_or(Error::ProgramNotLoaded)?;
+    //     let ev_name = CString::new(format!("{}{}", fn_name, self.attach_type)).unwrap();
+    //     let cname = CString::new(fn_name).unwrap();
+    //     let pfd = unsafe {
+    //         bpf_sys::bpf_attach_kprobe(
+    //             fd,
+    //             self.attach_type,
+    //             ev_name.as_ptr(),
+    //             cname.as_ptr(),
+    //             offset,
+    //             0,
+    //         )
+    //     };
+
+    //     if pfd < 0 {
+    //         Err(Error::BPF)
+    //     } else {
+    //         Ok(())
+    //     }
+    // }
+
+    // pub fn name(&self) -> String {
+    //     self.common.name.to_string()
+    // }
+}
+
 impl Module {
     pub fn parse(bytes: &[u8]) -> Result<Module> {
         let object = Elf::parse(&bytes[..])?;
@@ -553,6 +654,8 @@ impl Module {
 
             let section_type = shdr.sh_type;
             let content = data(&bytes, &shdr);
+
+            println!("type {:?} name {:?} kind {:?}", section_type, name, kind);
 
             match (section_type, kind, name) {
                 (hdr::SHT_REL, _, _) => add_relocation(&mut rels, shndx, &shdr, shdr_relocs),
@@ -589,7 +692,8 @@ impl Module {
                 | (hdr::SHT_PROGBITS, Some(kind @ "uprobe"), Some(name))
                 | (hdr::SHT_PROGBITS, Some(kind @ "uretprobe"), Some(name))
                 | (hdr::SHT_PROGBITS, Some(kind @ "xdp"), Some(name))
-                | (hdr::SHT_PROGBITS, Some(kind @ "socketfilter"), Some(name)) => {
+                | (hdr::SHT_PROGBITS, Some(kind @ "socketfilter"), Some(name))
+                | (hdr::SHT_PROGBITS, Some(kind @ "skskb"), Some(name)) => {
                     programs.insert(shndx, Program::new(kind, name, &content)?);
                 }
                 _ => {}
@@ -637,6 +741,14 @@ impl Module {
         use Program::*;
         self.programs.iter().filter_map(|prog| match prog {
             UProbe(p) | URetProbe(p) => Some(p),
+            _ => None,
+        })
+    }
+
+    pub fn sk_skbs(&self) -> impl Iterator<Item = &SkSkb> {
+        use Program::*;
+        self.programs.iter().filter_map(|prog| match prog {
+            SkSkb(p) | SkSkb(p) => Some(p),
             _ => None,
         })
     }
@@ -783,19 +895,43 @@ impl Map {
 
     fn with_map_def(name: &str, config: bpf_map_def) -> Result<Map> {
         let cname = CString::new(name)?;
+        println!("with_map_def {:?}", config);
         let fd = unsafe {
-            bpf_sys::bcc_create_map(
-                config.type_,
-                cname.as_ptr(),
-                config.key_size as i32,
-                config.value_size as i32,
-                config.max_entries as i32,
-                config.map_flags as i32,
-            )
+            // if name == "sockmap" {
+            //     let lim = rlimit::Rlim::from_usize(128 * 1024 * 1024);
+            //     rlimit::setrlimit(rlimit::Resource::MEMLOCK, lim, lim).unwrap();
+            //     let new_lim = rlimit::getrlimit(rlimit::Resource::MEMLOCK);
+            //     println!("newrlim {:?}", new_lim);
+            // }
+
+            if name == "sockmapz" {
+                Self::bpf_create_map(
+                    config.type_,
+                    cname,
+                    config.key_size,
+                    config.value_size,
+                    config.max_entries,
+                    config.map_flags,
+                )
+            } else {
+                bpf_sys::bcc_create_map(
+                    config.type_,
+                    cname.as_ptr(),
+                    config.key_size as i32,
+                    config.value_size as i32,
+                    config.max_entries as i32,
+                    config.map_flags as i32,
+                )
+            }
         };
         if fd < 0 {
-            return Err(Error::Map);
+            let erro = std::io::Error::last_os_error();
+            println!("erro {:?}", erro);
         }
+        // if fd < 0 {
+        //     return Err(Error::Map);
+        // }
+        println!("with_map_def fd {:?}", fd);
 
         Ok(Map {
             name: name.to_string(),
@@ -805,6 +941,50 @@ impl Map {
             section_data: false,
         })
     }
+
+    fn bpf_create_map(
+        map_type: bpf_sys::bpf_map_type,
+        name: CString, 
+        key_size: u32,
+        value_size: u32,
+        max_entries: u32,
+        map_flags: u32
+    ) -> i32 {
+        println!("bpf_create_map");
+
+        unsafe {
+
+            let map_name = [0i8; 16];
+
+            let attr = bpf_sys::bpf_attr__bindgen_ty_1 {
+                map_type : map_type,
+                key_size : key_size,
+                value_size : value_size,
+                max_entries : max_entries,
+                map_flags : map_flags,
+                inner_map_fd: 0,
+                numa_node: 0,
+                map_name,
+                map_ifindex: 0,
+                btf_fd: 0,
+                btf_key_type_id: 0,
+                btf_value_type_id: 0
+            };
+            let fd = Self::sys_bpf(bpf_sys::bpf_cmd_BPF_MAP_CREATE, &attr as *const bpf_sys::bpf_attr__bindgen_ty_1 as *const _, 20);
+
+            if fd < 0 {
+                let erro = std::io::Error::last_os_error();
+                println!("erro {:?}", erro);
+            }
+
+            fd as i32
+        }
+    }
+
+    unsafe fn sys_bpf(cmd: bpf_sys::bpf_cmd, attr: *const std::ffi::c_void, size: usize) -> i64{
+        libc::syscall(libc::SYS_bpf, cmd, attr, size)
+    }
+    
 }
 
 impl<'base, K: Clone, V: Clone> HashMap<'base, K, V> {
